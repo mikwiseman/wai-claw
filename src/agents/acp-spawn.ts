@@ -32,7 +32,10 @@ import {
 } from "../infra/outbound/session-binding-service.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.js";
-import { startAcpSpawnParentStreamRelay } from "./acp-spawn-parent-stream.js";
+import {
+  resolveAcpSpawnStreamLogPath,
+  startAcpSpawnParentStreamRelay,
+} from "./acp-spawn-parent-stream.js";
 import { resolveSandboxRuntimeStatus } from "./sandbox/runtime-status.js";
 
 export const ACP_SPAWN_MODES = ["run", "session"] as const;
@@ -67,6 +70,7 @@ export type SpawnAcpResult = {
   childSessionKey?: string;
   runId?: string;
   mode?: SpawnAcpMode;
+  streamLogPath?: string;
   note?: string;
   error?: string;
 };
@@ -459,12 +463,24 @@ export async function spawnAcpDirect(
   }
 
   if (streamToParentRequested && parentSessionKey) {
+    const streamLogPath = resolveAcpSpawnStreamLogPath({
+      childSessionKey: sessionKey,
+    });
     startAcpSpawnParentStreamRelay({
       runId: childRunId,
       parentSessionKey,
       childSessionKey: sessionKey,
       agentId: targetAgentId,
+      logPath: streamLogPath,
     });
+    return {
+      status: "accepted",
+      childSessionKey: sessionKey,
+      runId: childRunId,
+      mode: spawnMode,
+      ...(streamLogPath ? { streamLogPath } : {}),
+      note: spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
+    };
   }
 
   return {
