@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
+import { readAcpSessionEntry } from "../acp/runtime/session-meta.js";
+import { resolveSessionFilePath, resolveSessionFilePathOptions } from "../config/sessions/paths.js";
 import { onAgentEvent } from "../infra/agent-events.js";
 import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
@@ -35,11 +39,45 @@ function toFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function resolveAcpStreamLogPathFromSessionFile(sessionFile: string, sessionId: string): string {
+  const baseDir = path.dirname(path.resolve(sessionFile));
+  return path.join(baseDir, `${sessionId}.acp-stream.jsonl`);
+}
+
+export function resolveAcpSpawnStreamLogPath(params: {
+  childSessionKey: string;
+}): string | undefined {
+  const childSessionKey = params.childSessionKey.trim();
+  if (!childSessionKey) {
+    return undefined;
+  }
+  const storeEntry = readAcpSessionEntry({
+    sessionKey: childSessionKey,
+  });
+  const sessionId = storeEntry?.entry?.sessionId?.trim();
+  if (!storeEntry || !sessionId) {
+    return undefined;
+  }
+  try {
+    const sessionFile = resolveSessionFilePath(
+      sessionId,
+      storeEntry.entry,
+      resolveSessionFilePathOptions({
+        storePath: storeEntry.storePath,
+      }),
+    );
+    return resolveAcpStreamLogPathFromSessionFile(sessionFile, sessionId);
+  } catch {
+    return undefined;
+  }
+}
+
 export function startAcpSpawnParentStreamRelay(params: {
   runId: string;
   parentSessionKey: string;
   childSessionKey: string;
   agentId: string;
+  logPath?: string;
   streamFlushMs?: number;
   noOutputNoticeMs?: number;
   noOutputPollMs?: number;
@@ -65,6 +103,36 @@ export function startAcpSpawnParentStreamRelay(params: {
 
   const relayLabel = truncate(compactWhitespace(params.agentId), 40) || "ACP child";
   const contextPrefix = `acp-spawn:${runId}`;
+  const logPath = toTrimmedString(params.logPath);
+  const writeLogLine = (entry: Record<string, unknown>) => {
+    if (!logPath) {
+      return;
+    }
+    try {
+      fs.mkdirSync(path.dirname(logPath), {
+        recursive: true,
+      });
+      const line = `${JSON.stringify(entry)}\n`;
+      fs.appendFileSync(logPath, line, {
+        encoding: "utf-8",
+        mode: 0o600,
+      });
+    } catch {
+      // Best-effort diagnostics; never break relay flow.
+    }
+  };
+  const logEvent = (kind: string, fields?: Record<string, unknown>) => {
+    writeLogLine({
+      ts: new Date().toISOString(),
+      epochMs: Date.now(),
+      runId,
+      parentSessionKey,
+      childSessionKey: params.childSessionKey,
+      agentId: params.agentId,
+      kind,
+      ...fields,
+    });
+  };
   const wake = () => {
     requestHeartbeatNow(
       scopedHeartbeatWakeOptions(parentSessionKey, { reason: "acp:spawn:stream" }),
@@ -75,6 +143,7 @@ export function startAcpSpawnParentStreamRelay(params: {
     if (!cleaned) {
       return;
     }
+    logEvent("system_event", { contextKey, text: cleaned });
     enqueueSystemEvent(cleaned, { sessionKey: parentSessionKey, contextKey });
     wake();
   };
@@ -152,6 +221,7 @@ export function startAcpSpawnParentStreamRelay(params: {
       if (!delta) {
         return;
       }
+      logEvent("assistant_delta", { delta });
 
       if (stallNotified) {
         stallNotified = false;
@@ -176,6 +246,7 @@ export function startAcpSpawnParentStreamRelay(params: {
     }
 
     const phase = toTrimmedString((event.data as { phase?: unknown } | undefined)?.phase);
+    logEvent("lifecycle", { phase: phase ?? "unknown", data: event.data });
     if (phase === "end") {
       flushPending();
       const startedAt = toFiniteNumber(
