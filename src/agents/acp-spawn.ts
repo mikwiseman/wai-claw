@@ -429,6 +429,23 @@ export async function spawnAcpDirect(
   const deliverToBoundTarget = hasDeliveryTarget && !streamToParentRequested;
   const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
+  const streamLogPath =
+    streamToParentRequested && parentSessionKey
+      ? resolveAcpSpawnStreamLogPath({
+          childSessionKey: sessionKey,
+        })
+      : undefined;
+  let disposeParentRelay: (() => void) | undefined;
+  if (streamToParentRequested && parentSessionKey) {
+    // Register relay before dispatch so fast lifecycle failures are not missed.
+    disposeParentRelay = startAcpSpawnParentStreamRelay({
+      runId: childIdem,
+      parentSessionKey,
+      childSessionKey: sessionKey,
+      agentId: targetAgentId,
+      logPath: streamLogPath,
+    });
+  }
   try {
     const response = await callGateway<{ runId?: string }>({
       method: "agent",
@@ -449,6 +466,7 @@ export async function spawnAcpDirect(
       childRunId = response.runId.trim();
     }
   } catch (err) {
+    disposeParentRelay?.();
     await cleanupFailedAcpSpawn({
       cfg,
       sessionKey,
@@ -463,16 +481,17 @@ export async function spawnAcpDirect(
   }
 
   if (streamToParentRequested && parentSessionKey) {
-    const streamLogPath = resolveAcpSpawnStreamLogPath({
-      childSessionKey: sessionKey,
-    });
-    startAcpSpawnParentStreamRelay({
-      runId: childRunId,
-      parentSessionKey,
-      childSessionKey: sessionKey,
-      agentId: targetAgentId,
-      logPath: streamLogPath,
-    });
+    if (disposeParentRelay && childRunId !== childIdem) {
+      disposeParentRelay();
+      // Defensive fallback if gateway returns a runId that differs from idempotency key.
+      startAcpSpawnParentStreamRelay({
+        runId: childRunId,
+        parentSessionKey,
+        childSessionKey: sessionKey,
+        agentId: targetAgentId,
+        logPath: streamLogPath,
+      });
+    }
     return {
       status: "accepted",
       childSessionKey: sessionKey,
