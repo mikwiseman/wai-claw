@@ -398,4 +398,30 @@ describe("AcpxRuntime", () => {
       delete process.env.MOCK_ACPX_ENSURE_EMPTY;
     }
   });
+
+  it("fails with ACP_SESSION_INIT_FAILED when both ensure and new omit session IDs", async () => {
+    process.env.MOCK_ACPX_ENSURE_EMPTY = "1";
+    process.env.MOCK_ACPX_NEW_EMPTY = "1";
+    try {
+      const { runtime, logPath } = await createMockRuntimeFixture();
+
+      await expect(
+        runtime.ensureSession({
+          sessionKey: "agent:claude:acp:fallback-fail",
+          agent: "claude",
+          mode: "persistent",
+        }),
+      ).rejects.toMatchObject({
+        code: "ACP_SESSION_INIT_FAILED",
+        message: expect.stringContaining("neither 'sessions ensure' nor 'sessions new'"),
+      });
+
+      const logs = await readMockRuntimeLogEntries(logPath);
+      expect(logs.some((entry) => entry.kind === "ensure")).toBe(true);
+      expect(logs.some((entry) => entry.kind === "new")).toBe(true);
+    } finally {
+      delete process.env.MOCK_ACPX_ENSURE_EMPTY;
+      delete process.env.MOCK_ACPX_NEW_EMPTY;
+    }
+  });
 });
